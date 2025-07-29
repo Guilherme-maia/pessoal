@@ -1,0 +1,864 @@
+Inicialização de pacotes, variáveis e funções
+
+
+%pyspark
+
+####################################################
+#   Importação de pacotes & definição de funções   #
+####################################################
+
+from datetime import *
+from pyspark import StorageLevel
+from pyspark.sql import SparkSession
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+
+# Função para otimizar o tamanho dos arquivos de saída definindo um número otimal de partições
+def numPartitionsOut(dataframe, n):
+    
+    from math import floor
+
+    # Volumetria do dataframe
+    v = dataframe.count()
+    
+    return int(floor(v/n))
+
+
+# Função de leitura do Metadados
+def readMetadata(dir):
+  
+  import json
+  
+  # Lendo o metadados do diretório especificado
+  metadados = []
+  
+  for linha in spark.sparkContext.textFile(dir).collect():
+    info = json.loads(linha)
+
+    # Faz o tratamento dos campos com conteúdo 'None' e monta o array da janela de tempo
+    for chave in info:
+      if info[chave] == "None":
+        info[chave] = None
+        
+      if chave == "janela_de_tempo" and info[chave]:
+        string = info[chave]
+        range00 = int(string.split("([")[1].split(",")[0])
+        range01 = int(string.split("([")[1].split(",")[1].split("]")[0])
+        unidade = string.split("([")[1].split(",")[2].split(")")[0].strip().replace("'", "")
+        info[chave] = [(range00, range01), unidade]
+        
+    metadados.append(info)
+  
+  return metadados
+
+
+##############################
+#   Declaração de variáveis  #
+##############################
+
+# Referência de processamento
+ref = str(datetime.today() + timedelta(days = -1))[0:4] + str(datetime.today() + timedelta(days = -1))[5:7] + str(datetime.today() + timedelta(days = -1))[8:10]
+
+# Caminho de origem da stage0
+origem_stage0 = "s3://stage0-pedidos-ecred/dataform/parquet/*.parquet"
+
+# Caminho de destino do metadados
+destino_meta = "s3://lake-ecs-ia-utils/dataform/metadados/"
+
+# Caminho de destino do book
+destino_book = "s3://book-pedidos-ecred/dataform/parquet/"
+
+# Iniciando sessão spark
+spark = SparkSession.builder.appName("book_pedidos_ind_desenv").getOrCreate()
+
+
+
+
+
+
+CLASSE DATAFORM
+
+
+%pyspark
+
+class Dataform:
+  
+  # Lista com os deparas de tipagem
+  depara = {"NullType()": NullType(), "StringType()": StringType(), "BinaryType()": BinaryType(), "BooleanType()": BooleanType(), "DateType()": DateType(), "TimestampType()": TimestampType(),
+"DecimalType()": DecimalType(), "DoubleType()": DoubleType(), "FloatType()": FloatType(), "ByteType()": ByteType(), "IntegerType()": IntegerType(), "LongType()": LongType(), "ShortType()": ShortType(),
+"ArrayType(NullType())": ArrayType(NullType()), "ArrayType(StringType())": ArrayType(StringType()), "ArrayType(BinaryType())": ArrayType(BinaryType()), "ArrayType(BooleanType())": ArrayType(BooleanType()), "ArrayType(DateType())": ArrayType(DateType()), "ArrayType(TimestampType())": ArrayType(TimestampType()), "ArrayType(DecimalType())": ArrayType(DecimalType()), "ArrayType(DoubleType())": ArrayType(DoubleType()), "ArrayType(FloatType())": ArrayType(FloatType()), "ArrayType(ByteType())": ArrayType(ByteType()), "ArrayType(IntegerType())": ArrayType(IntegerType()), "ArrayType(LongType())": ArrayType(LongType()), 
+"ArrayType(ShortType())": ArrayType(ShortType())}
+  
+  # Referência de processamento
+  ref = str(datetime.today())[0:10]
+  
+  def __init__(self, Dataframe, Metadata=None):
+    
+    if not Metadata:
+      self.Dataframe = Dataframe
+      self.Metadata = []
+      
+      # Vamos inicializar a construção do metadata de cada variável
+      for coluna in self.Dataframe.columns:
+        info = {
+          "nome": coluna,
+          "origem": coluna,
+          "tipo": "StringType()",
+          "valor_se_nulo": None,
+          "dominio": None,
+          "transformacao": None,
+          "versao": self.ref
+        }
+        self.Metadata.append(info)
+    else:
+        self.Metadata = Metadata
+        
+        # A partir de um dado metadados fornecido pelo usuário, iniciaremos o Dataforming
+        # Etapa 01 - Pré seleção das colunas de origem
+        infos_com_origem = [info for info in self.Metadata if info["origem"]]
+        colunas = [info["origem"] for info in infos_com_origem]
+        self.Dataframe = Dataframe.select(colunas)
+        
+        # Etapa 02 - Inicializa os módulos (Caster, Coalescer, Transformer, Domain, Namer)
+        # Faremos primeiro os casos sem origem
+        infos_sem_origem = [info for info in self.Metadata if not info["origem"]]
+        infos_de_grau_maiorigual_um = []
+        
+        for info in infos_sem_origem:
+          try:
+            self.transformedAs({info["nome"]: info["transformacao"]}, True)
+            self.coalescedAs({info["nome"]: info["valor_se_nulo"]}, True)
+            self.castedAs({info["nome"]: self.depara[info["tipo"]]}, True)
+            self.domainAs({info["nome"]: info["dominio"]}, True)
+          except:
+            infos_de_grau_maiorigual_um.append(info)
+            
+        # Agora os casos que possuem origem
+        for info in infos_com_origem:
+          self.transformedAs({info["origem"]: info["transformacao"]}, True)
+          self.coalescedAs({info["origem"]: info["valor_se_nulo"]}, True)
+          self.castedAs({info["origem"]: self.depara[info["tipo"]]}, True)
+          self.domainAs({info["origem"]: info["dominio"]}, True)
+          
+        # Executa os módulos para as variáveis de grau maior ou iguais a 1
+        index = 0
+        
+        while infos_de_grau_maiorigual_um:
+          info = infos_de_grau_maiorigual_um[index]
+          
+          try:
+            self.transformedAs({info["nome"]: info["transformacao"]}, True)
+            self.coalescedAs({info["nome"]: info["valor_se_nulo"]}, True)
+            self.castedAs({info["nome"]: self.depara[info["tipo"]]}, True)
+            self.domainAs({info["nome"]: info["dominio"]}, True)
+            infos_de_grau_maiorigual_um.remove(info)
+            index = 0
+          except:
+            index += 1
+
+        # Por fim executa o módulo Namer para as variáveis com origem
+        for info in infos_com_origem:
+            self.namedAs({info["origem"]: info["nome"]}, True)
+
+  
+  # Método de atualização do metadados
+  def __updateMetadata__(self, col_list, dict_list):
+    
+    # Verifica e insere informações novas
+    for coluna in [nova_coluna for nova_coluna in col_list if nova_coluna not in self.Dataframe.columns]:
+      self.Metadata.append({"nome": coluna, "origem": None, "tipo": "StringType()", "valor_se_nulo": None, "dominio": None, "transformacao": None, "versao": self.ref})
+    
+    # Atualiza de fato o metadados
+    for info in self.Metadata:
+      if info["nome"] in col_list:
+        index = col_list.index(info["nome"])
+        dict = dict_list[index]
+        
+        for chave in dict.keys():
+          info[chave] = dict[chave]
+      
+      
+  # Método de construção do dataframe para o metadados
+  def __buildMetadataDF__(self):
+    
+    # Construção do header
+    meta_header = []
+    for chave in self.Metadata[0].keys():
+      meta_header.append(chave)
+    
+    # Construção das linhas
+    lst_rows = []
+    for info in self.Metadata:
+      row = []
+      
+      for valor in info.values():
+        row.append(str(valor))
+      lst_rows.append(row)
+      
+    # Constrói o dataframe
+    meta_DF = spark.createDataFrame(lst_rows, meta_header)
+    return meta_DF
+    
+    
+  @property # Retorna o metadados
+  def metadata(self):
+    return self.Metadata
+  
+  
+  @property # Retorna o dataframe
+  def dataframe(self):
+    return self.Dataframe
+  
+  
+  # Módulo 01 - Alteração de tipagem dos campos
+  def castedAs(self, dict, imported_metadata=False):
+    
+    lst_casted = []
+    
+    for coluna in self.Dataframe.columns:
+      if coluna in dict.keys() and dict[coluna]:
+        casted = col(coluna).cast(dict[coluna])
+        aliased = casted.alias(coluna)
+        if not imported_metadata:
+          self.__updateMetadata__([coluna], [{"tipo": str(dict[coluna]) + "()", "versao": self.ref}])
+      else:
+        aliased = col(coluna)
+      lst_casted.append(aliased)
+      
+    self.Dataframe = self.Dataframe.select(lst_casted)
+  
+  
+  # Módulo 02 - Tratamento de valores nulos
+  def coalescedAs(self, dict, imported_metadata=False):
+    
+    lst_coalesced = []
+    
+    for coluna in self.Dataframe.columns:
+      if coluna in dict.keys():
+        # Devemos checar primeiro se temos um valor a inserir ou uma expressão envolvendo uma ou mais colunas
+        try:
+          self.Dataframe.select(expr(dict[coluna]))
+          coalesced = coalesce(col(coluna), expr(dict[coluna]))
+        except:
+          coalesced = coalesce(col(coluna), lit(dict[coluna]))
+        finally:
+          aliased = coalesced.alias(coluna)
+          if not imported_metadata:
+            self.__updateMetadata__([coluna], [{"valor_se_nulo": dict[coluna], "versao": self.ref}])
+      else:
+          aliased = col(coluna)
+      lst_coalesced.append(aliased)
+        
+    self.Dataframe = self.Dataframe.select(lst_coalesced)
+  
+  
+  # Módulo 03 - Captura ou inserção da listagem de domínios
+  def domainAs(self, dict, imported_metadata=False):
+    
+    if not imported_metadata:
+      for info in self.Metadata:
+        if info["nome"] in dict.keys():
+          # Verifica se necessitamos gerar este domínio através de um agrupamento na variável
+          try:
+            dominio = ""
+            valores = self.Dataframe.select(dict[info["nome"]]).orderBy(dict[info["nome"]]).dropDuplicates().collect()
+
+            for valor in valores:
+              dominio += str(valor[info["nome"]]) + ", "
+            info["dominio"] = dominio[:-2]
+          except:
+            info["dominio"] = dict[info["nome"]]
+          info["versao"] = self.ref
+  
+  
+  # Módulo 04 - Aplica transformações em colunas existentes ou cria colunas novas
+  def transformedAs(self, dict, imported_metadata=False):
+    
+    lst_transformed = []
+    
+    # Caso 01 - Coluna já existente no dataframe
+    for coluna in self.Dataframe.columns:
+      if coluna in dict.keys() and dict[coluna]:
+        transformed = expr(dict[coluna])
+        aliased = transformed.alias(coluna)
+        if not imported_metadata:
+          self.__updateMetadata__([coluna], [{"transformacao": dict[coluna], "versao": self.ref}])
+      else:
+        aliased = col(coluna)
+      lst_transformed.append(aliased)
+        
+    # Caso 02 - Uma nova coluna a ser criada
+    for coluna in [nova_coluna for nova_coluna in dict.keys() if nova_coluna not in self.Dataframe.columns]:
+      transformed = expr(dict[coluna]).cast(StringType())
+      aliased = transformed.alias(coluna)
+      lst_transformed.append(aliased)
+      if not imported_metadata:
+        self.__updateMetadata__([coluna], [{"transformacao": dict[coluna], "versao": self.ref}])
+        
+    self.Dataframe = self.Dataframe.select(lst_transformed)
+  
+  
+  # Módulo 05 - Renomeação de variáveis
+  def namedAs(self, dict, imported_metadata=False):
+    
+    lst_named = []
+    
+    for coluna in self.Dataframe.columns:
+      if coluna in dict.keys() and dict[coluna]:
+        aliased = col(coluna).alias(dict[coluna])
+        if not imported_metadata:
+          self.__updateMetadata__([coluna], [{"nome": dict[coluna], "versao": self.ref}])
+      else:
+        aliased = col(coluna)
+      lst_named.append(aliased)
+    
+    self.Dataframe = self.Dataframe.select(lst_named)
+  
+  
+  # Visualização do Metadados
+  def viewMetadata(self, truncate=True):
+    
+    meta_DF = self.__buildMetadataDF__()
+    meta_DF = meta_DF.select(col("nome").alias("Nome"), col("origem").alias("Origem"), col("tipo").alias("Tipo"), col("valor_se_nulo").alias("Valor/Expressão(SQL) se Nulo"), 
+                             col("dominio").alias("Domínio"), col("transformacao").alias("Transformação(SQL)"), col("versao").alias("Versão"))
+    
+    return meta_DF.show(len(self.Metadata), truncate)
+  
+  
+  # Exportação do metadados para um diretório especificado pelo usuário
+  def saveMetadata(self, dir):
+    
+    meta_DF = self.__buildMetadataDF__()
+    meta_DF.coalesce(1).write.mode("overwrite").format("json").save(dir)
+    
+    return "> Metadados exportado com SUCESSO para o diretório: {}.".format(dir)
+    
+
+
+
+
+%pyspark
+
+class Book(Dataform):
+    
+    depara_dias_segundos = {"d": 1, "s": 7, "m": 30, "a": 365, "h": 3600, "min": 60, "seg": 1}
+    
+    def __init__(self, origem, visao, referencia, Metadata=None, Publico=None):
+        
+        # Define o público base do book
+        if not Publico:
+            self.Dataframe = origem.select(visao).withColumn("dt_proc", current_date()).withColumn(referencia, current_date()).dropDuplicates().orderBy(visao)
+            self.Publico = origem.select(visao).withColumn(referencia, current_date()).dropDuplicates().orderBy(visao)
+        else:
+            self.Dataframe = Publico.withColumn("dt_proc", current_date()).orderBy(visao, referencia)
+            self.Publico = Publico
+            
+        self.Origem = origem
+        self.Metadata = []
+        self.chave_primaria = visao
+        self.chave_temporal = referencia
+        
+        if Metadata:
+            self.Metadata = Metadata
+            
+            # A partir do metadados fornecido pelo usuário iniciaremos a construção do book
+            # Primeiramente iniciaremos fazendo o depara da tipagem dos dados
+            for info in self.Metadata:
+              info["tipo"] = self.depara[info["tipo"]]
+            
+            # Depois daremos início ao processo de ETL
+            self.bookedAs(self.Metadata, imported_metadata=True)
+    
+    
+    # Retorna o Público
+    @property
+    def publico(self):
+      return self.Publico
+    
+    
+    # Método de atualização do metadados (Book)
+    def __updateMetadata__(self, col_list, dict_list):
+      
+      # Verifica e insere informações novas
+      for coluna in [nova_coluna for nova_coluna in col_list if nova_coluna not in self.Dataframe.columns]:
+        self.Metadata.append({"nome": coluna, "origem": None, "tipo": "StringType()", "valor_se_nulo": None, "dominio": None, "transformacao": None, 
+                              "filtro": None, "janela_de_tempo": None, "variavel_temporal": None, "agregacao": None, "duplicidade": None, 
+                              "versao": self.ref})
+
+      # Atualiza de fato o metadados
+      for info in self.Metadata:
+        if info["nome"] in col_list:
+          index = col_list.index(info["nome"])
+          dict = dict_list[index]
+
+          for chave in dict.keys():
+            info[chave] = dict[chave]
+    
+    
+    # Visualização do Metadados (Book)
+    def viewMetadata(self, truncate=True):
+
+      meta_DF = self.__buildMetadataDF__()
+      meta_DF = meta_DF.select(col("nome").alias("Nome"), col("origem").alias("Origem"), col("tipo").alias("Tipo"), col("valor_se_nulo").alias("Valor/Expressão(SQL) se Nulo"), 
+                               col("dominio").alias("Domínio"), col("transformacao").alias("Transformação(SQL)"), col("filtro").alias("Filtro(SQL) na Origem"),
+                               col("janela_de_tempo").alias("(Range de Datas, Unidade de Tempo)"), col("variavel_temporal").alias("Variável Temporal"),
+                               col("agregacao").alias("Função de Agregação"), col("duplicidade").alias("Remoção de Duplicidade por"), col("versao").alias("Versão"))
+      
+      return meta_DF.show(len(self.Metadata), truncate)
+    
+    
+    # Realiza extração dos dados
+    def __extractAs__(self, ref, dict):
+        
+        # Aplica filtro(s) na origem caso necessário
+        if dict["filtro"]:
+          filtrada = self.Origem.select(self.chave_primaria, dict["origem"], dict["variavel_temporal"]).filter(dict["filtro"])
+        else:
+          filtrada = self.Origem.select(self.chave_primaria, dict["origem"], dict["variavel_temporal"])
+        
+        # Verifica se após o filtro a base filtrada possui volumetria, caso contrário aborta o processo e informa ao usuário
+        if filtrada.limit(1).count() == 0:
+          raise EmptyDataframeError("O filtro para esta variável resultou em uma volumetria zerada. Verificar se a construção do filtro está correta.")
+          
+        # Aplica janelas de tempo
+        if dict["janela_de_tempo"][1] in ["d", "s", "m", "a"]:
+            inicio = date_add(lit(ref), dict["janela_de_tempo"][0][0] * self.depara_dias_segundos[dict["janela_de_tempo"][1]])
+            fim = date_add(lit(ref), dict["janela_de_tempo"][0][1] * self.depara_dias_segundos[dict["janela_de_tempo"][1]])
+            
+            extracao = filtrada.filter(col(dict["variavel_temporal"]).between(inicio, fim))
+        else:
+            inicio = unix_timestamp(lit(ref)) + dict["janela_de_tempo"][0][0] * self.depara_dias_segundos[dict["janela_de_tempo"][1]]
+            fim = unix_timestamp(lit(ref)) + dict["janela_de_tempo"][0][1] * self.depara_dias_segundos[dict["janela_de_tempo"][1]]
+            
+            extracao = filtrada.filter(unix_timestamp(col(dict["variavel_temporal"])).between(inicio, fim))
+        
+        # Verifica e remove duplicidade
+        if dict["duplicidade"]:
+            extracao = extracao.dropDuplicates(dict["duplicidade"])
+            
+        return extracao.withColumn(self.chave_temporal, lit(ref))
+    
+    
+    # Realiza agregação dos dados
+    def __aggregateAs__(self, extracao, info):
+      
+      agregacao = extracao.groupBy(self.chave_primaria, self.chave_temporal).agg(expr(info["agregacao"]).alias(info["nome"]))
+      return agregacao
+    
+    
+    # Recupera o público e constrói o Book
+    def __buildAs__(self, agregacao):
+      
+      self.Dataframe = self.Dataframe.join(agregacao, on = [self.chave_primaria, self.chave_temporal], how = "left").orderBy(self.chave_primaria, self.chave_temporal)
+    
+    
+    # Aplica o dataforming sobre o Book
+    def __dataformAs__(self, info, imported_metadata):
+      
+      self.transformedAs({info["nome"]: info["transformacao"]}, imported_metadata)
+      self.coalescedAs({info["nome"]: info["valor_se_nulo"]}, imported_metadata)
+      self.castedAs({info["nome"]: info["tipo"]}, imported_metadata)
+      self.domainAs({info["nome"]: info["dominio"]}, imported_metadata)
+    
+    
+    # Acoplamento dos módulos: Extractor, Aggregator , Builder e Dataformer
+    def __ETL__(self, info, vetor_de_datas, imported_metadata):
+      
+      aux = list(vetor_de_datas)
+      
+      # Etapa 03 - Extração
+      extracao = self.__extractAs__(aux[0], info)
+      aux.remove(aux[0])
+
+      for ref in aux:
+        extracao = extracao.union(self.__extractAs__(ref, info))
+      
+      # Etapa 04 - Agregação
+      agregacao = self.__aggregateAs__(extracao, info)
+      
+      # Etapa 05 - Recupera Público
+      self.__buildAs__(agregacao)
+      
+      # Etapa 06 - Dataforming
+      self.__dataformAs__(info, imported_metadata)
+    
+    
+    # Módulo de construção de variáveis
+    def bookedAs(self, lst, imported_metadata=False):
+        
+        vars_com_origem = [var for var in lst if var["origem"] and var["nome"] not in self.Dataframe.columns]
+        vars_sem_origem = [var for var in lst if not var["origem"] and var["nome"] not in self.Dataframe.columns]
+        
+        # Etapa 01 - Insere no metadados as informações das variáveis novas
+        if not imported_metadata:
+          variaveis = [var["nome"] for var in vars_com_origem]
+          self.__updateMetadata__(variaveis, vars_com_origem)
+        
+        # Etapa 02 - Gera vetor de datas para extração a partir do público
+        vetor_de_datas = [str(data[self.chave_temporal]) for data in self.Publico.select(self.chave_temporal).orderBy(self.chave_temporal).dropDuplicates().collect()]
+            
+        # Inicia a construção das variáveis de grau menor ou iguais a um
+        for info in vars_com_origem:
+          
+          self.__ETL__(info, vetor_de_datas, imported_metadata)
+        
+        # Inicia a construção das variáveis de grau maior ou iguais a 2
+        index = 0
+        while vars_sem_origem:
+          
+          info = vars_sem_origem[index]
+          
+          try:
+            # Verificamos se a variável necessita de agregação, dado que, variáveis deste tipo agregam como base de origem o próprio Book
+            if info["agregacao"]:
+              self.__updateMetadata__([info["nome"]], [info])
+              extracao = self.Dataframe
+
+              # Filtramos o próprio Book se necessário
+              if info["filtro"]:
+                extracao = extracao.filter(info["filtro"])
+
+              # Realiza agregação e a recuperação do público
+              agregacao = self.__aggregateAs__(extracao, info)
+              self.__buildAs__(agregacao)
+
+            self.__dataformAs__(info, imported_metadata)
+            vars_sem_origem.remove(info)
+            index = 0
+          except:
+            index += 1
+            
+
+
+
+LEITURA DA ORIGEM
+%pyspark
+
+# Vamos trazer apenas os status mais recentes de cada pedido
+stage0 = spark.read.parquet(origem_stage0) \
+    .withColumn("order", expr("row_number() over(partition by cd_request order by ts_updated desc)")) \
+    .filter(col("order") == 1) \
+    .drop("order") \
+    .persist(StorageLevel.DISK_ONLY)
+    
+print("> Volumetria da stage0 de pedidos com os status mais recentes: {}".format(stage0.count()))
+
+
+
+GERAR PUBLICO
+# Vamos gerar um público com uma ref apenas para testes
+publico = stage0.filter(col("cd_uuid") != "").limit(5).select("cd_uuid").dropDuplicates().withColumn("dt_ref", lit("2019-11-28").cast(DateType())).persist(StorageLevel.DISK_ONLY)
+print("> Volumetria do público de entrada: {}".format(publico.count()))
+
+pub00 = publico.withColumn("dt_ref", lit("2019-10-31").cast(DateType()))
+pub01 = publico.withColumn("dt_ref", lit("2019-09-30").cast(DateType()))
+pub02 = publico.withColumn("dt_ref", lit("2019-08-31").cast(DateType()))
+pub = pub00.union(pub01).union(pub02)
+
+
+pub.show(15, False)
+
++------------------------------------+----------+
+|cd_uuid                             |dt_ref    |
++------------------------------------+----------+
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-10-31|
+|0886509f-14d9-4f0f-947a-5dd0797c55cd|2019-10-31|
+|391822c3-de26-45c1-b3c9-a351ccaeec2c|2019-10-31|
+|16414a4e-d499-4abe-a070-cbaac912442c|2019-10-31|
+|3ff3b932-387b-45ac-8a73-9023705ca5f1|2019-10-31|
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-09-30|
+|0886509f-14d9-4f0f-947a-5dd0797c55cd|2019-09-30|
+|391822c3-de26-45c1-b3c9-a351ccaeec2c|2019-09-30|
+|16414a4e-d499-4abe-a070-cbaac912442c|2019-09-30|
+|3ff3b932-387b-45ac-8a73-9023705ca5f1|2019-09-30|
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-08-31|
++------------------------------------+----------+
+
+
+
+INICIA A CONSTRUCAO DO BOOK
+# Iniciação da instância Book
+book = Book(stage0, "cd_uuid", "dt_ref", Publico=pub)
+
+
+CRIACAO DE VARIAVIES
+%pyspark
+
+vars = [
+    {
+        "nome": "total_pedidos_ultimos30d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> ''",
+        "janela_de_tempo": ([-30, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "total_pedidos_ultimos60d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> ''",
+        "janela_de_tempo": ([-60, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "total_pedidos_liberados_ultimos30d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> '' and ds_status = 'Liberado'",
+        "janela_de_tempo": ([-30, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "razao_total_pedidos_ultimos30_60d",
+        "origem": None,
+        "tipo": DoubleType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": "case when total_pedidos_ultimos60d = 0 then 0 else total_pedidos_ultimos30d/total_pedidos_ultimos60d end",
+        "filtro": None,
+        "janela_de_tempo": None,
+        "variavel_temporal": None,
+        "agregacao": None,
+        "duplicidade": None
+    }
+]
+
+book.bookedAs(vars)
+
+
+
+
+book.dataframe.show(15, False)
+
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+|cd_uuid                             |dt_ref    |dt_proc   |total_pedidos_ultimos30d|total_pedidos_ultimos60d|total_pedidos_liberados_ultimos30d|razao_total_pedidos_ultimos30_60d|
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-08-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-09-30|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|021743f6-751b-41cb-859a-b4eca07a729c|2019-10-31|2019-11-28|1                       |1                       |0                                 |1.0                              |
+|0886509f-14d9-4f0f-947a-5dd0797c55cd|2019-08-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|0886509f-14d9-4f0f-947a-5dd0797c55cd|2019-09-30|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|0886509f-14d9-4f0f-947a-5dd0797c55cd|2019-10-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|16414a4e-d499-4abe-a070-cbaac912442c|2019-08-31|2019-11-28|0                       |3                       |0                                 |0.0                              |
+|16414a4e-d499-4abe-a070-cbaac912442c|2019-09-30|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|16414a4e-d499-4abe-a070-cbaac912442c|2019-10-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|391822c3-de26-45c1-b3c9-a351ccaeec2c|2019-08-31|2019-11-28|2                       |5                       |0                                 |0.4                              |
+|391822c3-de26-45c1-b3c9-a351ccaeec2c|2019-09-30|2019-11-28|0                       |2                       |0                                 |0.0                              |
+|391822c3-de26-45c1-b3c9-a351ccaeec2c|2019-10-31|2019-11-28|2                       |2                       |0                                 |1.0                              |
+|3ff3b932-387b-45ac-8a73-9023705ca5f1|2019-08-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|3ff3b932-387b-45ac-8a73-9023705ca5f1|2019-09-30|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|3ff3b932-387b-45ac-8a73-9023705ca5f1|2019-10-31|2019-11-28|0                       |0                       |0                                 |0.0                              |
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+
+
+book.viewMetadata(False)
++----------------------------------+----------+-------------+----------------------------+-------+--------------------------------------------------------------------------------------------------------+----------------------------------------+----------------------------------+-----------------+-------------------+--------------------------+----------+
+|Nome                              |Origem    |Tipo         |Valor/Expressão(SQL) se Nulo|Domínio|Transformação(SQL)                                                                                      |Filtro(SQL) na Origem                   |(Range de Datas, Unidade de Tempo)|Variável Temporal|Função de Agregação|Remoção de Duplicidade por|Versão    |
++----------------------------------+----------+-------------+----------------------------+-------+--------------------------------------------------------------------------------------------------------+----------------------------------------+----------------------------------+-----------------+-------------------+--------------------------+----------+
+|total_pedidos_ultimos30d          |cd_request|IntegerType()|0                           |None   |None                                                                                                    |cd_uuid <> ''                           |([-30, 0], 'd')                   |dt_request       |count(*)           |None                      |2019-11-28|
+|total_pedidos_ultimos60d          |cd_request|IntegerType()|0                           |None   |None                                                                                                    |cd_uuid <> ''                           |([-60, 0], 'd')                   |dt_request       |count(*)           |None                      |2019-11-28|
+|total_pedidos_liberados_ultimos30d|cd_request|IntegerType()|0                           |None   |None                                                                                                    |cd_uuid <> '' and ds_status = 'Liberado'|([-30, 0], 'd')                   |dt_request       |count(*)           |None                      |2019-11-28|
+|razao_total_pedidos_ultimos30_60d |None      |DoubleType() |0                           |None   |case when total_pedidos_ultimos60d = 0 then 0 else total_pedidos_ultimos30d/total_pedidos_ultimos60d end|None                                    |None                              |None             |None               |None                      |2019-11-28|
++----------------------------------+----------+-------------+----------------------------+-------+--------------------------------------------------------------------------------------------------------+----------------------------------------+----------------------------------+-----------------+-------------------+--------------------------+----------+
+
+
+
+book.saveMetadata(destino_meta)
+
+
+
+
+metadados = readMetadata(destino_meta + "book_pedidos.json")
+metadados
+
+[{u'transformacao': None, u'tipo': u'IntegerType()', u'agregacao': u'count(*)', u'nome': u'total_pedidos_ultimos30d', u'janela_de_tempo': [(-30, 0), u'd'], u'versao': u'2019-11-28', u'variavel_temporal': u'dt_request', u'dominio': None, u'origem': u'cd_request', u'filtro': u"cd_uuid <> ''", u'valor_se_nulo': u'0', u'duplicidade': None}, {u'transformacao': None, u'tipo': u'IntegerType()', u'agregacao': u'count(*)', u'nome': u'total_pedidos_ultimos60d', u'janela_de_tempo': [(-60, 0), u'd'], u'versao': u'2019-11-28', u'variavel_temporal': u'dt_request', u'dominio': None, u'origem': u'cd_request', u'filtro': u"cd_uuid <> ''", u'valor_se_nulo': u'0', u'duplicidade': None}, {u'transformacao': None, u'tipo': u'IntegerType()', u'agregacao': u'count(*)', u'nome': u'total_pedidos_liberados_ultimos30d', u'janela_de_tempo': [(-30, 0), u'd'], u'versao': u'2019-11-28', u'variavel_temporal': u'dt_request', u'dominio': None, u'origem': u'cd_request', u'filtro': u"cd_uuid <> '' and ds_status = 'Liberado'", u'valor_se_nulo': u'0', u'duplicidade': None}, {u'transformacao': u'case when total_pedidos_ultimos60d = 0 then 0 else total_pedidos_ultimos30d/total_pedidos_ultimos60d end', u'tipo': u'DoubleType()', u'agregacao': None, u'nome': u'razao_total_pedidos_ultimos30_60d', u'janela_de_tempo': None, u'versao': u'2019-11-28', u'variavel_temporal': None, u'dominio': None, u'origem': None, u'filtro': None, u'valor_se_nulo': u'0', u'duplicidade': None}]
+
+
+
+bookPrd = Book(stage0, "cd_uuid", "dt_ref", Metadata=metadados)
+
+
+bookPrd.dataframe.show(20, False)
+
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+|cd_uuid                             |dt_ref    |dt_proc   |total_pedidos_ultimos30d|total_pedidos_ultimos60d|total_pedidos_liberados_ultimos30d|razao_total_pedidos_ultimos30_60d|
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+|                                    |2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|0000004b-220d-4d38-86aa-2d3b78b5f99c|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|000003f4-3163-40a8-a01b-49bfc663ee08|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|000009e6-4e73-4db1-8d9a-724e4f4d8081|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00000ab8-05f0-4868-b12c-2bd44f620a0f|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00000b89-1255-4c78-80a6-ae446aedb53f|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00002433-583e-4b0d-8048-0e943cc3c5f4|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00003073-8573-47d5-8fae-f402ad7453d1|2019-11-28|2019-11-28|0                       |2                       |0                                 |0.0                              |
+|00003de7-a80a-4429-a963-f14f3b4cb6b6|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00003fbb-09dd-4506-903e-d2081fcd0884|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00004361-7e32-4d28-8218-0658bb7d96d3|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00004424-3050-4573-86fb-d80982814e8d|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00005414-e826-4632-b5ca-cefe6b4a14f8|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00006c91-a908-49e0-b8a5-39522dd04682|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00007581-244b-412f-acdf-c3b8cc66b9e2|2019-11-28|2019-11-28|0                       |1                       |0                                 |0.0                              |
+|00007d05-47bf-42b0-a273-a8a68d76d21f|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|00007ef0-a906-4d4f-9eb8-57926523a555|2019-11-28|2019-11-28|0                       |1                       |0                                 |0.0                              |
+|00008213-a899-419e-8421-d035ffe76e51|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|000083cc-e609-43db-87c3-9970c6385b0a|2019-11-28|2019-11-28|0                       |0                       |0                                 |0.0                              |
+|000092fd-f232-42b9-8e45-1f3011499889|2019-11-28|2019-11-28|0                       |1                       |0                                 |0.0                              |
++------------------------------------+----------+----------+------------------------+------------------------+----------------------------------+---------------------------------+
+only showing top 20 rows
+
+
+HOMOLOGACAO
+
+# total_pedidos_ultimos30d
+stage0 \
+    .filter(col("dt_request").between(date_add(lit("2019-10-11"), -30), "2019-10-11")) \
+    .groupBy("cd_uuid") \
+    .agg(count("*").alias("homolog_total_pedidos_ultimos30d")) \
+    .join(book.dataframe.select("cd_uuid", "total_pedidos_ultimos30d"), on = ["cd_uuid"], how = "inner") \
+    .show(5, False)
+
+
+# total_pedidos_ultimos60d
+stage0 \
+    .filter(col("dt_request").between(date_add(lit("2019-10-11"), -60), "2019-10-11")) \
+    .groupBy("cd_uuid") \
+    .agg(count("*").alias("homolog_total_pedidos_ultimos60d")) \
+    .join(book.dataframe.select("cd_uuid", "total_pedidos_ultimos60d"), on = ["cd_uuid"], how = "inner") \
+    .show(5, False)
+
+
+# total_pedidos_liberados_ultimos30d
+stage0 \
+    .filter(col("dt_request").between(date_add(lit("2019-10-11"), -30), "2019-10-11")) \
+    .filter(col("ds_status") == "Liberado") \
+    .groupBy("cd_uuid") \
+    .agg(count("*").alias("homolog_total_pedidos_liberados_ultimos30d")) \
+    .join(book.dataframe.select("cd_uuid", "total_pedidos_liberados_ultimos30d"), on = ["cd_uuid"], how = "inner") \
+    .show(5, False)
+
+
+
++------------------------------------+--------------------------------+------------------------+
+|cd_uuid                             |homolog_total_pedidos_ultimos30d|total_pedidos_ultimos30d|
++------------------------------------+--------------------------------+------------------------+
+|fa30d10a-3573-443b-bfd8-35be9c5c5c55|3                               |3                       |
++------------------------------------+--------------------------------+------------------------+
+
++------------------------------------+--------------------------------+------------------------+
+|cd_uuid                             |homolog_total_pedidos_ultimos60d|total_pedidos_ultimos60d|
++------------------------------------+--------------------------------+------------------------+
+|fa30d10a-3573-443b-bfd8-35be9c5c5c55|3                               |3                       |
+|922b8611-2015-466e-ba6d-b1afb403da0b|3                               |3                       |
++------------------------------------+--------------------------------+------------------------+
+
++-------+------------------------------------------+----------------------------------+
+|cd_uuid|homolog_total_pedidos_liberados_ultimos30d|total_pedidos_liberados_ultimos30d|
++-------+------------------------------------------+----------------------------------+
++-------+------------------------------------------+----------------------------------+
+
+
+
+COM PUBLICO GERAO A PARTIR DA ORIGEM
+book = Book(stage0, "cd_uuid", "dt_ref")
+
+%pyspark
+
+vars = [
+    {
+        "nome": "total_pedidos_ultimos30d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> ''",
+        "janela_de_tempo": ([-30, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "total_pedidos_ultimos60d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> ''",
+        "janela_de_tempo": ([-60, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "total_pedidos_liberados_ultimos30d",
+        "origem": "cd_request",
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": None,
+        "filtro": "cd_uuid <> '' and ds_status = 'Liberado'",
+        "janela_de_tempo": ([-30, 0], "d"),
+        "variavel_temporal": "dt_request",
+        "agregacao": "count(*)",
+        "duplicidade": None
+    },
+    {
+        "nome": "razao_liberados_pedidos_ultimos30d",
+        "origem": None,
+        "tipo": IntegerType(),
+        "valor_se_nulo": 0,
+        "dominio": None,
+        "transformacao": "case when total_pedidos_ultimos30d = 0 then 0 else round(total_pedidos_liberados_ultimos30d/total_pedidos_ultimos30d, 2) end",
+        "filtro": None,
+        "janela_de_tempo": None,
+        "variavel_temporal": None,
+        "agregacao": None,
+        "duplicidade": None
+    }
+]
+
+book.bookedAs(vars)
+
+
+
+book.dataframe.show(5)
++--------------------+----------+----------+------------------------+------------------------+----------------------------------+----------------------------------+
+|             cd_uuid|    dt_ref|   dt_proc|total_pedidos_ultimos30d|total_pedidos_ultimos60d|total_pedidos_liberados_ultimos30d|razao_liberados_pedidos_ultimos30d|
++--------------------+----------+----------+------------------------+------------------------+----------------------------------+----------------------------------+
+|                    |2019-10-14|2019-10-14|                       0|                       0|                                 0|                                 0|
+|0000004b-220d-4d3...|2019-10-14|2019-10-14|                       0|                       0|                                 0|                                 0|
+|000003f4-3163-40a...|2019-10-14|2019-10-14|                       0|                       0|                                 0|                                 0|
+|000009e6-4e73-4db...|2019-10-14|2019-10-14|                       0|                       0|                                 0|                                 0|
+|00000ab8-05f0-486...|2019-10-14|2019-10-14|                       0|                       1|                                 0|                                 0|
++--------------------+----------+----------+------------------------+------------------------+----------------------------------+----------------------------------+
+only showing top 5 rows
+
+
+
+book.dataframe.count()
+
+
+
+book.dataframe.groupBy("dt_ref").agg(max(col("razao_liberados_pedidos_ultimos30d"))).show(1, False)
+
+
+
+
+
