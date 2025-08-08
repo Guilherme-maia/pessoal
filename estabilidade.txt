@@ -1,0 +1,120 @@
+-----------------------
+-- INSERINDO A SAFRA --
+-----------------------
+
+insert into `{table_stability}`
+WITH
+auxiliar_estabilidade AS (
+    SELECT * FROM
+        (
+            SELECT 
+                bu_canal
+                , modelo_book
+                , variavel
+                , publico
+                , segmento
+                , 'BASELINE' AS BASE
+                , CLASSE
+                , SUM(QUANTIDADE) / SUM(SUM(QUANTIDADE)) OVER(PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS PRCNT
+            FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+            WHERE safra in ('BASELINE') 
+            GROUP BY 1,2,3,4,5,6,7
+            UNION ALL
+            SELECT 
+                bu_canal
+                , modelo_book
+                , variavel
+                , publico
+                , segmento
+                , 'ATUAL' AS BASE
+                , CLASSE
+                , SUM(QUANTIDADE) / SUM(SUM(QUANTIDADE)) OVER(PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS PRCNT
+            FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+            WHERE safra = substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6)
+            GROUP BY 1,2,3,4,5,6,7
+        ) A
+        PIVOT(SUM(PRCNT) FOR BASE IN ('BASELINE','ATUAL'))
+        ORDER BY segmento, bu_canal, modelo_book, variavel, CLASSE
+),
+auxiliar_estabilidade_acu AS (
+    SELECT 
+        * 
+        , SUM(BASELINE) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS BASELINE_ACU
+        , SUM(ATUAL) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS ATUAL_ACU
+    FROM auxiliar_estabilidade
+),
+estabilidade_final AS (
+    SELECT 
+    substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6) as safra
+    , bu_canal
+    , modelo_book
+    , variavel
+    , publico
+    , segmento
+    , ROUND(SUM(PSI),3) AS PSI
+    , ROUND(MAX(ABS(KS1)),3) AS KS1
+    FROM (
+        SELECT 
+         bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , Classe
+        , ATUAL
+        , BASELINE
+        , ATUAL_ACU
+        , BASELINE_ACU
+        , CASE WHEN 
+                SUM(ATUAL_ACU) IS NULL
+                THEN 0 
+                ELSE SUM(IFNULL(ABS(ATUAL_ACU),0.001) - IFNULL(ABS(BASELINE_ACU),0.001)) 
+                END AS KS1
+        , CASE WHEN 
+                SUM(ATUAL) IS NULL
+                THEN 0 
+                ELSE SUM(IFNULL(ABS(ATUAL),0.001) - IFNULL(ABS(BASELINE),0.001)) * LOG(IFNULL(ATUAL,0.001)/IFNULL(IF(BASELINE = 0,0.001,BASELINE),0.001)) 
+                END AS PSI
+        FROM auxiliar_estabilidade_acu
+        GROUP BY bu_canal, modelo_book, variavel, publico, segmento, Classe, ATUAL, BASELINE, ATUAL_ACU, BASELINE_ACU
+    )
+    GROUP BY safra, bu_canal, modelo_book, variavel, publico, segmento
+)
+SELECT 
+    A.* except(timestamp)
+    , CASE WHEN B.KS1 >= 0.99 THEN 0 ELSE B.KS1 END AS KS1
+    , CASE WHEN B.PSI >= 0.99 THEN 0 ELSE B.PSI END AS PSI
+FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` AS A 
+LEFT JOIN estabilidade_final AS B
+ON a.safra = b.safra
+   AND a.bu_canal = b.bu_canal
+   AND a.modelo_book = b.modelo_book
+   AND a.variavel = b.variavel
+   AND a.publico = b.publico
+   AND a.segmento = b.segmento
+WHERE  a.safra = substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6);
+
+------------------------------------
+-- INSERINDO O BASELINE NOVAMENTE --
+------------------------------------
+
+insert into `{table_stability}`
+SELECT 
+      safra
+    , modelo_book
+    , bu_canal
+    , publico
+    , variavel_coringa1
+    , variavel_coringa2
+    , variavel_coringa3
+    , segmento
+    , variavel
+    , classe
+    , resposta1
+    , resposta2
+    , quantidade
+    , 0 AS PSI
+    , 0 AS KS1
+FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` 
+WHERE safra in ('BASELINE') ;
+
