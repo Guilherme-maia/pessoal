@@ -1,0 +1,282 @@
+--------------------------
+---- SAFRA PROCESSADA ----
+--------------------------
+
+insert into `{table_performance}`
+WITH 
+distrib_maus_1 AS (
+    SELECT 
+        bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , classe
+        , SUM(resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_maus
+        , SUM(quantidade - resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_bons
+        , SUM(resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_maus
+        , SUM(quantidade - resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_bons
+    FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+    WHERE safra = substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6)
+    AND SUBSTR(PUBLICO,1,10) <> 'INELEGIVEL'
+),
+distrib_cumulativa_1 AS (
+    SELECT
+        *,
+        SAFE_DIVIDE(CAST(cumul_maus AS FLOAT64),CAST(total_maus AS FLOAT64)) AS cumul_pct_maus, 
+        SAFE_DIVIDE(CAST(cumul_bons AS FLOAT64),CAST(total_bons AS FLOAT64)) AS cumul_pct_bons  
+    FROM distrib_maus_1
+),
+metrica_parciais_1 AS (
+    SELECT
+        *,
+        ABS(cumul_pct_maus - cumul_pct_bons) AS ks_parcial,
+        LAG(cumul_pct_maus) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_tpr,
+        LAG(cumul_pct_bons) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_fpr,
+        cumul_pct_maus AS tpr,
+        cumul_pct_bons AS fpr
+    FROM distrib_cumulativa_1
+),
+metrica_parciais_1_aux AS (
+    SELECT
+        *
+        , 0.5 * (tpr + prev_tpr) * (fpr - prev_fpr) AS trapezoid_area_bom
+        , 0.5 * (tpr - prev_tpr) * (fpr + prev_fpr) AS trapezoid_area_mau
+    FROM metrica_parciais_1
+    WHERE prev_tpr IS NOT NULL AND prev_fpr IS NOT NULL
+),
+distrib_maus_2 AS (
+    SELECT 
+        bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , classe
+        , SUM(resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_maus
+        , SUM(quantidade - resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_bons
+        , SUM(resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_maus
+        , SUM(quantidade - resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_bons
+    FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+    WHERE safra = substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6)
+    AND SUBSTR(PUBLICO,1,10) <> 'INELEGIVEL'
+),
+distrib_cumulativa_2 AS (
+    SELECT
+        *,
+        SAFE_DIVIDE(CAST(cumul_maus AS FLOAT64),CAST(total_maus AS FLOAT64)) AS cumul_pct_maus, 
+        SAFE_DIVIDE(CAST(cumul_bons AS FLOAT64),CAST(total_bons AS FLOAT64)) AS cumul_pct_bons  
+    FROM distrib_maus_2
+),
+metrica_parciais_2 AS (
+    SELECT
+        *,
+        ABS(cumul_pct_maus - cumul_pct_bons) AS ks_parcial,
+        LAG(cumul_pct_maus) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_tpr,
+        LAG(cumul_pct_bons) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_fpr,
+        cumul_pct_maus AS tpr,
+        cumul_pct_bons AS fpr
+    FROM distrib_cumulativa_2
+),
+metrica_parciais_2_aux AS (
+    SELECT
+        *
+        , 0.5 * (tpr + prev_tpr) * (fpr - prev_fpr) AS trapezoid_area_bom
+        , 0.5 * (tpr - prev_tpr) * (fpr + prev_fpr) AS trapezoid_area_mau
+    FROM metrica_parciais_2
+    WHERE prev_tpr IS NOT NULL AND prev_fpr IS NOT NULL
+),
+metrica_1 AS (
+    SELECT
+        substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6) as safra
+        , bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , ROUND(MAX(ks_parcial),4) AS ks2
+        , CASE WHEN ROUND(SUM(trapezoid_area_bom),4) <= 0.5 THEN ROUND(SUM(trapezoid_area_mau),4) ELSE ROUND(SUM(trapezoid_area_bom),4) END AS roc
+        , CASE WHEN ROUND((2*(SUM(trapezoid_area_bom))-1),4) <= 0 THEN ROUND((2*(SUM(trapezoid_area_mau))-1),4) ELSE ROUND((2*(SUM(trapezoid_area_bom))-1),4) END AS gini
+    FROM metrica_parciais_1_aux
+    GROUP BY safra, bu_canal, modelo_book, variavel, publico, segmento
+),
+metrica_2 AS (
+    SELECT
+        substr(replace(CAST('{data_version}' AS STRING),'-',''),1,6) as safra
+        , bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , ROUND(MAX(ks_parcial),4) AS ks2
+        , CASE WHEN ROUND(SUM(trapezoid_area_bom),4) <= 0.5 THEN ROUND(SUM(trapezoid_area_mau),4) ELSE ROUND(SUM(trapezoid_area_bom),4) END AS roc
+        , CASE WHEN ROUND((2*(SUM(trapezoid_area_bom))-1),4) <= 0 THEN ROUND((2*(SUM(trapezoid_area_mau))-1),4) ELSE ROUND((2*(SUM(trapezoid_area_bom))-1),4) END AS gini
+    FROM metrica_parciais_2_aux
+    GROUP BY safra, bu_canal, modelo_book, variavel, publico, segmento
+)
+SELECT 
+    A.safra
+    , A.modelo_book
+    , A.bu_canal
+    , A.segmento
+    , A.publico
+    , A.variavel
+    
+    , A.ks2 as ks2_resp1
+    , A.roc as roc_resp1
+    , CASE WHEN A.gini < 0 THEN 0 ELSE A.gini END AS gini_resp1
+
+    , B.ks2 as ks2_resp2
+    , B.roc as roc_resp2
+    , CASE WHEN B.gini < 0 THEN 0 ELSE B.gini END AS gini_resp2
+
+FROM metrica_1 AS A 
+LEFT JOIN metrica_2 AS B
+ON a.safra = b.safra
+   AND a.bu_canal = b.bu_canal
+   AND a.modelo_book = b.modelo_book
+   AND a.variavel = b.variavel
+   AND a.publico = b.publico
+   AND a.segmento = b.segmento;
+
+------------------
+---- BASELISE ----
+------------------
+
+insert into `{table_performance}`
+WITH 
+distrib_maus_1 AS (
+    SELECT 
+        bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , classe
+        , SUM(resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_maus
+        , SUM(quantidade - resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_bons
+        , SUM(resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_maus
+        , SUM(quantidade - resposta1) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_bons
+    FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+    WHERE safra = 'BASELINE'
+    AND SUBSTR(PUBLICO,1,10) <> 'INELEGIVEL'
+),
+distrib_cumulativa_1 AS (
+    SELECT
+        *,
+        SAFE_DIVIDE(CAST(cumul_maus AS FLOAT64),CAST(total_maus AS FLOAT64)) AS cumul_pct_maus, 
+        SAFE_DIVIDE(CAST(cumul_bons AS FLOAT64),CAST(total_bons AS FLOAT64)) AS cumul_pct_bons  
+    FROM distrib_maus_1
+),
+metrica_parciais_1 AS (
+    SELECT
+        *,
+        ABS(cumul_pct_maus - cumul_pct_bons) AS ks_parcial,
+        LAG(cumul_pct_maus) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_tpr,
+        LAG(cumul_pct_bons) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_fpr,
+        cumul_pct_maus AS tpr,
+        cumul_pct_bons AS fpr
+    FROM distrib_cumulativa_1
+),
+metrica_parciais_1_aux AS (
+    SELECT
+        *
+        , 0.5 * (tpr + prev_tpr) * (fpr - prev_fpr) AS trapezoid_area_bom
+        , 0.5 * (tpr - prev_tpr) * (fpr + prev_fpr) AS trapezoid_area_mau
+    FROM metrica_parciais_1
+    WHERE prev_tpr IS NOT NULL AND prev_fpr IS NOT NULL
+),
+distrib_maus_2 AS (
+    SELECT 
+        bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , classe
+        , SUM(resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_maus
+        , SUM(quantidade - resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS cumul_bons
+        , SUM(resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_maus
+        , SUM(quantidade - resposta2) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal) AS total_bons
+    FROM `{gcp_project_stg}.MLOps_Core.tb_cb_monitoramento` a
+    WHERE safra = 'BASELINE'
+    AND SUBSTR(PUBLICO,1,10) <> 'INELEGIVEL'
+),
+distrib_cumulativa_2 AS (
+    SELECT
+        *,
+        SAFE_DIVIDE(CAST(cumul_maus AS FLOAT64),CAST(total_maus AS FLOAT64)) AS cumul_pct_maus, 
+        SAFE_DIVIDE(CAST(cumul_bons AS FLOAT64),CAST(total_bons AS FLOAT64)) AS cumul_pct_bons  
+    FROM distrib_maus_2
+),
+metrica_parciais_2 AS (
+    SELECT
+        *,
+        ABS(cumul_pct_maus - cumul_pct_bons) AS ks_parcial,
+        LAG(cumul_pct_maus) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_tpr,
+        LAG(cumul_pct_bons) OVER (PARTITION BY variavel,modelo_book,publico,segmento,bu_canal ORDER BY CLASSE) AS prev_fpr,
+        cumul_pct_maus AS tpr,
+        cumul_pct_bons AS fpr
+    FROM distrib_cumulativa_2
+),
+metrica_parciais_2_aux AS (
+    SELECT
+        *
+        , 0.5 * (tpr + prev_tpr) * (fpr - prev_fpr) AS trapezoid_area_bom
+        , 0.5 * (tpr - prev_tpr) * (fpr + prev_fpr) AS trapezoid_area_mau
+    FROM metrica_parciais_2
+    WHERE prev_tpr IS NOT NULL AND prev_fpr IS NOT NULL
+),
+metrica_1 AS (
+    SELECT
+        'BASELINE' as safra
+        , bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , ROUND(MAX(ks_parcial),4) AS ks2
+        , CASE WHEN ROUND(SUM(trapezoid_area_bom),4) <= 0.5 THEN ROUND(SUM(trapezoid_area_mau),4) ELSE ROUND(SUM(trapezoid_area_bom),4) END AS roc
+        , CASE WHEN ROUND((2*(SUM(trapezoid_area_bom))-1),4) <= 0 THEN ROUND((2*(SUM(trapezoid_area_mau))-1),4) ELSE ROUND((2*(SUM(trapezoid_area_bom))-1),4) END AS gini
+    FROM metrica_parciais_1_aux
+    GROUP BY safra, bu_canal, modelo_book, variavel, publico, segmento
+),
+metrica_2 AS (
+    SELECT
+        'BASELINE' as safra
+        , bu_canal
+        , modelo_book
+        , variavel
+        , publico
+        , segmento
+        , ROUND(MAX(ks_parcial),4) AS ks2
+        , CASE WHEN ROUND(SUM(trapezoid_area_bom),4) <= 0.5 THEN ROUND(SUM(trapezoid_area_mau),4) ELSE ROUND(SUM(trapezoid_area_bom),4) END AS roc
+        , CASE WHEN ROUND((2*(SUM(trapezoid_area_bom))-1),4) <= 0 THEN ROUND((2*(SUM(trapezoid_area_mau))-1),4) ELSE ROUND((2*(SUM(trapezoid_area_bom))-1),4) END AS gini
+    FROM metrica_parciais_2_aux
+    GROUP BY safra, bu_canal, modelo_book, variavel, publico, segmento
+)
+SELECT 
+    A.safra
+    , A.modelo_book
+    , A.bu_canal
+    , A.segmento
+    , A.publico
+    , A.variavel
+    
+    , A.ks2 as ks2_resp1
+    , A.roc as roc_resp1
+    , CASE WHEN A.gini < 0 THEN 0 ELSE A.gini END AS gini_resp1
+
+    , B.ks2 as ks2_resp2
+    , B.roc as roc_resp2
+    , CASE WHEN B.gini < 0 THEN 0 ELSE B.gini END AS gini_resp2
+
+FROM metrica_1 AS A 
+LEFT JOIN metrica_2 AS B
+ON a.safra = b.safra
+   AND a.bu_canal = b.bu_canal
+   AND a.modelo_book = b.modelo_book
+   AND a.variavel = b.variavel
+   AND a.publico = b.publico
+   AND a.segmento = b.segmento;
+   
